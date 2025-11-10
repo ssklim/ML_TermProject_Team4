@@ -28,8 +28,8 @@ Cross Domain - Content_based / Hybrid
  <tr>
     <td align="center">임석현</td>
     <td align="center">강지원</td>
-    <td align="center">이은아</td>
     <td align="center">서은주</td>
+    <td align="center">이은아</td>
   </tr>
    <tr>
     <td align="center">Cross Domain - Hybrid </td>
@@ -37,4 +37,5 @@ Cross Domain - Content_based / Hybrid
     <td align="center">Cross Domain - Content based </td>
     <td align="center">Domain Transfer - Hybrid </td>
   </tr>
+
 
