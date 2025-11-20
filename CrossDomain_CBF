@@ -1,0 +1,310 @@
+## 데이터 불러오기 및 패키지 설치
+# Word2Vec 사용 준비
+import nltk
+nltk.download('punkt')
+nltk.download('punkt_tab')
+
+!pip install gensim
+
+# Content-Based Filtering (CBF)
+import pandas as pd
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+# Word2Vec
+import nltk
+from nltk.tokenize import word_tokenize
+from gensim.models import Word2Vec
+
+# Google Drive 마운트
+from google.colab import drive
+drive.mount('/content/drive')
+
+# 데이터 불러오기 및 병합
+drive_base_path = '/content/drive/MyDrive/머신러닝/임석현/'
+
+# (books_df 로드)
+book_file_path = f"{drive_base_path}books_for_content.csv"
+books_df = pd.read_csv(book_file_path)
+print(f"Loaded 'books_for_content.csv' ({books_df.shape})")
+
+# (movies_df 로드)
+movie_file_path = f"{drive_base_path}movies_for_content.csv"
+movies_df = pd.read_csv(movie_file_path)
+print(f"Loaded 'movies_for_content.csv' ({movies_df.shape}, {movies_df.columns.tolist()})")
+
+# (ratings_df 로드)
+rating_file_path = f"{drive_base_path}ratings_for_cf.csv"
+ratings_df = pd.read_csv(rating_file_path)
+print(f"Loaded '{rating_file_path}' ({ratings_df.shape}, {ratings_df.columns.tolist()})")
+
+# 'ratings_df'에 영화 제목('title')이 없으므로 'movies_df'와 병합
+movie_titles_df = movies_df[['movieId', 'title']]
+ratings_df = pd.merge(ratings_df, movie_titles_df, on='movieId', how='left')
+print("-> 'ratings_df'와 'movies_df'를 'movieId' 기준으로 병합 (영화 제목 추가)")
+
+print(f"\n평점 데이터 (병합 후): {ratings_df.shape}")
+
+## TF-IDF 기반 추천
+# TF-IDF 벡터화
+print("\nTF-IDF 벡터화 시작 (공유 어휘사전)...")
+all_text = pd.concat([movies_df['tag'], books_df['tag_list']])
+vectorizer = TfidfVectorizer(
+    stop_words='english',
+    max_features=5000,
+    ngram_range=(1, 2)
+)
+vectorizer.fit(all_text)
+movie_tfidf_matrix = vectorizer.transform(movies_df['tag'])
+book_tfidf_matrix = vectorizer.transform(books_df['tag_list'])
+print(f"영화 TF-IDF 매트릭스 형태: {movie_tfidf_matrix.shape}")
+print(f"책 TF-IDF 매트릭스 형태: {book_tfidf_matrix.shape}")
+
+
+# 핵심 추천 함수 (CBF 로직)
+def get_content_based_recommendations(liked_movie_titles, top_n=10):
+    """
+    좋아하는 영화 '제목 리스트'를 받아, 해당 영화들의
+    평균 콘텐츠 벡터와 유사한 책을 추천합니다.
+    """
+    print(f"\n--- [CBF 로직] '{', '.join(liked_movie_titles)}' 기반 추천 ---")
+
+    liked_movie_indices = movies_df[movies_df['title'].isin(liked_movie_titles)].index
+
+    if len(liked_movie_indices) == 0:
+        print(f"오류: {liked_movie_titles} 영화를 movies_df에서 찾을 수 없습니다.")
+        return pd.DataFrame()
+
+    liked_movie_vectors = movie_tfidf_matrix[liked_movie_indices]
+    user_preference_vector = np.mean(liked_movie_vectors, axis=0)
+    user_preference_vector = np.asarray(user_preference_vector)
+    sim_scores = cosine_similarity(user_preference_vector, book_tfidf_matrix)
+    sim_scores = sim_scores.flatten()
+    top_book_indices = sim_scores.argsort()[::-1][:top_n]
+    recommendations = books_df.iloc[top_book_indices].copy()
+    recommendations['similarity_score'] = sim_scores[top_book_indices]
+
+    return recommendations[['title', 'similarity_score']]
+
+# '평점 상위 N개' 기준으로 필터링하는 함수
+def recommend_books_for_user_by_top_movies(user_id, ratings_df, num_top_movies=10, top_n_books=3):
+    """
+    User ID를 받아, 해당 유저가 가장 높게 평가한 'num_top_movies'개의 영화를
+    '필터링'(정렬)한 후, get_content_based_recommendations 함수를 호출합니다.
+    """
+    print(f"\n======= 'User{user_id}'님을 위한 도서 추천 (Top {num_top_movies}개 평점 영화 기준) =======")
+
+    if user_id not in ratings_df['userId'].values:
+        print(f"오류: ratings_df에 '{user_id}'가 없습니다. (user_id 타입: {type(user_id)})")
+        return
+
+    user_all_ratings = ratings_df[ratings_df['userId'] == user_id]
+
+    if user_all_ratings.empty:
+        print(f"오류: '{user_id}'님의 평점 기록이 없습니다.")
+        return
+
+    user_sorted_ratings = user_all_ratings.sort_values(by='rating', ascending=False)
+    top_movies_df = user_sorted_ratings.head(num_top_movies)
+
+    highly_rated_movies = top_movies_df['title'].dropna().tolist()
+
+    if not highly_rated_movies:
+         print(f"오류: 'title' 컬럼을 찾지 못했거나, 영화 제목이 없습니다.")
+         return
+
+    print(f"[User{user_id}님이 가장 높게 평가한 {len(highly_rated_movies)}개 영화 (일부): {', '.join(highly_rated_movies[:5])}...]")
+
+    recommendations_df = get_content_based_recommendations(highly_rated_movies, top_n=top_n_books)
+
+    if not recommendations_df.empty:
+        print(f"\n[최종 추천 목록: User{user_id}]")
+        for i, (index, row) in enumerate(recommendations_df.iterrows()):
+            print(f"  추천 도서 {i+1}: {row['title']} (유사도: {row['similarity_score']:.4f})")
+    else:
+        print(f"추천 결과를 생성하지 못했습니다.")
+
+
+# 최종 실행
+print("\n\n======= TF-IDF 기반 추천 시작 =======")
+
+# ratings_df에서 모든 고유한 사용자 ID를 가져와 정렬
+unique_user_ids = sorted(ratings_df['userId'].unique())
+print(f"총 {len(unique_user_ids)}명의 유저가 발견되었습니다.")
+
+# 테스트용: 상위 10명의 유저 ID만 선택
+test_user_ids = unique_user_ids[:50]
+print(f"테스트를 위해 상위 {len(test_user_ids)}명의 유저에 대해 추천을 실행합니다...")
+
+# 각 사용자에 대해 추천 함수를 반복 호출
+# (전체 실행할 경우 for user_id in unique_user_ids:로 변경)
+for user_id in test_user_ids:
+    recommend_books_for_user_by_top_movies(
+        user_id=user_id,
+        ratings_df=ratings_df,
+        num_top_movies=10, # 기준: 평점 상위 10개 영화
+        top_n_books=5      # 결과: 추천 도서 5권
+    )
+    print("--------------------------------------------------")
+
+print("======= TF-IDF 기반 추천 완료 =======")
+
+## TF-IDF + Word2Vec 기반 추천
+# TF-IDF 벡터화
+print("\nTF-IDF 벡터화 시작 (공유 어휘사전)...")
+all_text = pd.concat([movies_df['tag'], books_df['tag_list']])
+vectorizer = TfidfVectorizer(
+    stop_words='english',
+    max_features=5000,
+    ngram_range=(1, 2)
+)
+vectorizer.fit(all_text)
+
+# 단어별 IDF(역문서 빈도, 단어 중요도) 점수를 딕셔너리로 추출
+# 이 점수가 Word2Vec의 가중치가 됨
+idf_dict = dict(zip(vectorizer.get_feature_names_out(), vectorizer.idf_))
+print("TF-IDF (IDF 가중치) 학습 완료.")
+
+# Word2Vec: 단어의 '의미'를 학습
+# 전체 텍스트를 토큰화 (단어 리스트로 변환)
+tokenized_corpus = [word_tokenize(doc.lower()) for doc in all_text]
+
+# Word2Vec 모델 학습
+w2v_vector_size = 100 # (Word2Vec 벡터의 차원)
+w2v_model = Word2Vec(
+    sentences=tokenized_corpus,
+    vector_size=w2v_vector_size,
+    window=5,      # (주변 단어 5개)
+    min_count=2,   # (최소 2번 이상 등장한 단어만 학습)
+    workers=4      # (CPU 코어 수)
+)
+print("Word2Vec (의미 벡터) 학습 완료.")
+
+# TF-IDF 가중치를 적용한 Word2Vec 벡터 생성 함수
+def create_hybrid_vector(text, w2v_model, idf_dict, vector_size):
+    """
+    텍스트를 입력받아, TF-IDF(IDF)로 가중 평균된 Word2Vec 벡터를 반환합니다.
+    """
+    vectors = []
+    weights = []
+
+    # 텍스트를 단어로 토큰화
+    for word in word_tokenize(text.lower()):
+        # 해당 단어가 Word2Vec 모델과 IDF 딕셔너리에 모두 존재하는지 확인
+        if word in w2v_model.wv and word in idf_dict:
+            vectors.append(w2v_model.wv[word]) # (의미 벡터)
+            weights.append(idf_dict[word])      # (중요도 가중치)
+
+    if not vectors:
+        # 텍스트에 아는 단어가 하나도 없으면 0벡터 반환
+        return np.zeros(vector_size)
+
+    # 가중 평균 계산
+    # np.average는 (벡터 리스트, 가중치 리스트)를 받아 가중 평균된 벡터 1개를 반환
+    weighted_avg_vector = np.average(vectors, axis=0, weights=weights)
+    return weighted_avg_vector
+
+# 영화와 책 데이터를 '하이브리드 벡터'로 변환
+print("하이브리드 벡터(TF-IDF + Word2Vec) 매트릭스 생성...")
+movie_hybrid_matrix = np.array([
+    create_hybrid_vector(doc, w2v_model, idf_dict, w2v_vector_size)
+    for doc in movies_df['tag']
+])
+book_hybrid_matrix = np.array([
+    create_hybrid_vector(doc, w2v_model, idf_dict, w2v_vector_size)
+    for doc in books_df['tag_list']
+])
+
+print(f"영화 하이브리드 매트릭스 형태: {movie_hybrid_matrix.shape}")
+print(f"책 하이브리드 매트릭스 형태: {book_hybrid_matrix.shape}")
+
+
+# 핵심 추천 함수 (CBF 로직)
+def get_content_based_recommendations(liked_movie_titles, top_n=10):
+    """
+    좋아하는 영화 '제목 리스트'를 받아, 해당 영화들의
+    평균 콘텐츠 벡터와 유사한 책을 추천.
+    """
+    print(f"\n--- [TF-IDF + Word2Vec CBF 로직] '{', '.join(liked_movie_titles)}' 기반 추천 ---")
+
+    liked_movie_indices = movies_df[movies_df['title'].isin(liked_movie_titles)].index
+
+    if len(liked_movie_indices) == 0:
+        print(f"오류: {liked_movie_titles} 영화를 movies_df에서 찾을 수 없습니다.")
+        return pd.DataFrame()
+
+    liked_movie_vectors = movie_hybrid_matrix[liked_movie_indices]
+    user_preference_vector = np.mean(liked_movie_vectors, axis=0)
+
+    # (1, N) 형태로 변환하여 코사인 유사도 계산
+    user_preference_vector = user_preference_vector.reshape(1, -1)
+
+    sim_scores = cosine_similarity(user_preference_vector, book_hybrid_matrix)
+    sim_scores = sim_scores.flatten()
+    top_book_indices = sim_scores.argsort()[::-1][:top_n]
+    recommendations = books_df.iloc[top_book_indices].copy()
+    recommendations['similarity_score'] = sim_scores[top_book_indices]
+
+    return recommendations[['title', 'similarity_score']]
+
+# '평점 상위 N개' 기준으로 필터링하는 함수
+def recommend_books_for_user_by_top_movies(userId, ratings_df, num_top_movies=10, top_n_books=3):
+    """
+    User ID를 받아, 해당 유저가 가장 높게 평가한 'num_top_movies'개의 영화를
+    '필터링'(정렬)한 후, get_content_based_recommendations 함수를 호출.
+    """
+    print(f"\n======= 'User{userId}'님을 위한 도서 추천 (Top {num_top_movies}개 평점 영화 기준) =======")
+
+    if userId not in ratings_df['userId'].values:
+        print(f"오류: ratings_df에 '{userId}'가 없습니다. (userId 타입: {type(userId)})")
+        return
+
+    user_all_ratings = ratings_df[ratings_df['userId'] == userId]
+
+    if user_all_ratings.empty:
+        print(f"오류: '{userId}'님의 평점 기록이 없습니다.")
+        return
+
+    user_sorted_ratings = user_all_ratings.sort_values(by='rating', ascending=False)
+    top_movies_df = user_sorted_ratings.head(num_top_movies)
+
+    highly_rated_movies = top_movies_df['title'].dropna().tolist()
+
+    if not highly_rated_movies:
+         print(f"오류: 'title' 컬럼을 찾지 못했거나, 영화 제목이 없습니다.")
+         return
+
+    print(f"[User{userId}님이 가장 높게 평가한 {len(highly_rated_movies)}개 영화 (일부): {', '.join(highly_rated_movies[:5])}...]")
+
+    recommendations_df = get_content_based_recommendations(highly_rated_movies, top_n=top_n_books)
+
+    if not recommendations_df.empty:
+        print(f"\n[최종 추천 목록: {userId}]")
+        for i, (index, row) in enumerate(recommendations_df.iterrows()):
+            print(f"  추천 도서 {i+1}: {row['title']} (유사도: {row['similarity_score']:.4f})")
+    else:
+        print(f"추천 결과를 생성하지 못했습니다.")
+
+# 최종 실행
+print("\n\n======= TF+IDF + Word2Vec 기반 추천 최종 실행  =======")
+
+# ratings_df에서 모든 고유한 사용자 ID를 가져와 정렬
+unique_user_ids = sorted(ratings_df['userId'].unique())
+print(f"총 {len(unique_user_ids)}명의 유저가 발견되었습니다.")
+
+# 테스트용: 일부의 유저 ID만 선택
+test_user_ids = unique_user_ids[:100]
+print(f"테스트를 위해 상위 {len(test_user_ids)}명의 유저에 대해 추천 실행 시작 ...")
+
+# 각 사용자에 대해 추천 함수를 반복 호출
+# 전체 실행의 경우) for user_id in unique_user_ids: 로 변경하기
+for userId in test_user_ids:
+    recommend_books_for_user_by_top_movies(
+        userId=userId,
+        ratings_df=ratings_df,
+        num_top_movies=10, # 기준: 평점 상위 10개 영화
+        top_n_books=5      # 결과: 추천 도서 5권
+    )
+    print("--------------------------------------------------")
+
+print("======= TF-IDF + Word2Vec 기반 추천 완료 =======")
