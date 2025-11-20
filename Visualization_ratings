@@ -1,0 +1,112 @@
+## 필요 라이브러리 설치
+!pip install gdown -q
+!sudo fc-cache -fv
+!rm ~/.cache/matplotlib -rf
+
+print("라이브러리 설치 완료.")
+
+## 라이브러리 임포트
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import gdown
+
+# 마이너스 기호 깨짐 방지
+plt.rc('axes', unicode_minus=False)
+
+print("라이브러리 임포트 완료.")
+
+## 데이터 불러오기
+from google.colab import drive
+drive.mount('/content/drive')
+# 데이터 불러오기
+drive_base_path = '/content/drive/MyDrive/머신러닝/'
+
+movie_file_path = f"{drive_base_path}movie_tot.csv"
+df_m = pd.read_csv(movie_file_path)
+print(f"Loaded 'movie_tot.csv'")
+book_file_path = f"{drive_base_path}goodbooks.csv"
+df_b = pd.read_csv(book_file_path)
+print(f"Loaded 'goodbooks.csv'")
+
+## 데이터 전처리 (평점 구간 나누기) 후 시각화
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+def process_ratings(df, df_name="Data"):
+    """
+    DataFrame을 입력받아 'rating' 컬럼 binning하고,
+    구간별 카운트를 반환하는 함수
+    """
+    df = df.copy()
+    print(f"\n--- Processing {df_name} ---")
+
+    # 'rating' 컬럼이 있는지 확인
+    if 'rating' not in df.columns:
+        print(f"Error: 'rating' column not found in {df_name}.")
+        return None # 오류 발생 시 None 반환
+
+    min_rating = df['rating'].min()
+    max_rating = df['rating'].max()
+    print(f"Original rating range: {min_rating} ~ {max_rating}")
+
+    bins = [1.0, 2.0, 3.0, 4.0, 5.0, 5.1]
+    labels = ['1-Star (1.0-1.9)', '2-Star (2.0-2.9)', '3-Star (3.0-3.9)', '4-Star (4.0-4.9)', '5-Star (5.0)']
+
+    df['rating_bin'] = pd.cut(df['rating'],
+                              bins=bins,
+                              labels=labels,
+                              right=False,
+                              include_lowest=True)
+
+    below_one_count = df[df['rating'] < 1.0]['rating'].count()
+    if below_one_count > 0:
+        print(f"Warning: {below_one_count} ratings below 1.0 were included in the '1-Star' bin.")
+
+    rating_counts = df['rating_bin'].value_counts().reset_index()
+    rating_counts.columns = ['rating_range', 'count']
+    rating_counts = rating_counts.sort_values(by='rating_range')
+
+    print("Rating counts per bin:")
+    print(rating_counts)
+
+    return rating_counts
+
+# 그래프 그리기
+def plot_ratings(rating_counts_df, title="Rating Distribution"):
+    """
+    처리된 rating_counts DataFrame을 입력받아
+    막대 그래프(bar plot)를 그리는 함수
+    """
+    if rating_counts_df is None or rating_counts_df.empty:
+        print(f"\nNo data to plot for '{title}'. Skipping visualization.")
+        return
+
+    plt.figure(figsize=(12, 7))
+
+    ax = sns.barplot(data=rating_counts_df, x='rating_range', y='count', palette='viridis')
+
+    # Set titles and labels (입력받은 title 사용)
+    ax.set_title(title, fontsize=16, fontweight='bold')
+    ax.set_xlabel('Rating Range', fontsize=12)
+    ax.set_ylabel('Number of Ratings', fontsize=12)
+
+    # Annotate bars in English
+    for p in ax.patches:
+        ax.annotate(f'{int(p.get_height())} ratings',
+                    (p.get_x() + p.get_width() / 2., p.get_height()),
+                    ha='center', va='center',
+                    xytext=(0, 9),
+                    textcoords='offset points')
+
+    plt.show()
+
+# 1. Movie (df_m) 데이터 처리 및 시각화
+rating_counts_m = process_ratings(df_m, df_name="Movie Data (df_m)")
+plot_ratings(rating_counts_m, title="Movie Rating Distribution")
+
+
+# 2. Book (df_b) 데이터 처리 및 시각화
+rating_counts_b = process_ratings(df_b, df_name="Book Data (df_b)")
+plot_ratings(rating_counts_b, title="Book Rating Distribution")
