@@ -1,0 +1,188 @@
+# 1. 환경 설정 및 라이브러리 임포트
+# Word2Vec 사용 준비
+import nltk
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
+try:
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+    nltk.download('punkt_tab')
+
+!pip install gensim
+
+import pandas as pd
+import numpy as np
+import nltk
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from gensim.models import Word2Vec
+from nltk.tokenize import word_tokenize
+
+# Google Drive 마운트
+from google.colab import drive
+drive.mount('/content/drive')
+
+# 2. 경로 및 설정 (Configuration)
+drive_base_path = '/content/drive/MyDrive/머신러닝/임석현/'
+save_base_path = '/content/drive/MyDrive/머신러닝/'  
+
+USER_ID_TO_ANALYZE = 1  # 분석할 유저 ID
+TOP_MOVIES_N = 20       # 유저가 평가한 상위 영화 수
+TOP_BOOKS_N = 10        # 유저에게 추천할 도서 수
+
+# 3. 데이터 로드 및 전처리 (Data Load & Preprocessing)
+try:
+    print("데이터 로드 중...")
+    books_df = pd.read_csv(f"{drive_base_path}books_for_content.csv")
+    movies_df = pd.read_csv(f"{drive_base_path}movies_for_content.csv")
+    ratings_df = pd.read_csv(f"{drive_base_path}ratings_for_cf.csv")
+    print("모든 데이터 로드 완료.")
+
+except FileNotFoundError as e:
+    print(f"오류: 파일을 찾을 수 없습니다. 경로를 확인하세요. {e}")
+    exit()
+except Exception as e:
+    print(f"데이터 로드 중 오류 발생: {e}")
+    exit()
+
+# 데이터 병합 (ratings + movies)
+movie_titles_df = movies_df[['movieId', 'title']]
+ratings_df = pd.merge(ratings_df, movie_titles_df, on='movieId', how='left')
+
+# 결측치(NaN) 처리
+movies_df['tag'] = movies_df['tag'].fillna('')
+books_df['tag_list'] = books_df['tag_list'].fillna('')
+
+print("데이터 전처리 완료.")
+
+# 4. Task A: User의 Top 20 영화 추출 및 저장
+print(f"\n--- User {USER_ID_TO_ANALYZE}의 Top {TOP_MOVIES_N}개 영화 추출 ---")
+
+user_all_ratings = ratings_df[ratings_df['userId'] == USER_ID_TO_ANALYZE]
+
+# 유저가 좋아하는 영화 목록 추출 (공통 사용 변수)
+highly_rated_movie_titles = [] 
+
+if user_all_ratings.empty:
+    print(f"오류: User {USER_ID_TO_ANALYZE}의 평점 기록이 없습니다.")
+    exit() # 유저 기록이 없으면 이후 추천 불가하므로 종료
+else:
+    user_top_movies_df = user_all_ratings.sort_values(by='rating', ascending=False).head(TOP_MOVIES_N)
+    highly_rated_movie_titles = user_top_movies_df['title'].dropna().tolist()
+    
+    # CSV 저장
+    output_df_A = user_top_movies_df[['userId', 'title', 'rating']]
+    output_path_A = f"{save_base_path}user_{USER_ID_TO_ANALYZE}_top_{TOP_MOVIES_N}_movies.csv"
+    output_df_A.to_csv(output_path_A, index=False)
+    print(f"Top {TOP_MOVIES_N}개 영화를 저장했습니다.")
+
+
+# 5. 모델 학습 (TF-IDF & Word2Vec)
+print(f"\n--- 모델 학습 시작 ---")
+
+# 5-1. TF-IDF 학습 (공통 사용)
+print("TF-IDF 벡터화 학습 중...")
+all_text = pd.concat([movies_df['tag'], books_df['tag_list']])
+vectorizer = TfidfVectorizer(stop_words='english', max_features=5000, ngram_range=(1, 2))
+vectorizer.fit(all_text)
+
+movie_tfidf_matrix = vectorizer.transform(movies_df['tag'])
+book_tfidf_matrix = vectorizer.transform(books_df['tag_list'])
+
+idf_dict = dict(zip(vectorizer.get_feature_names_out(), vectorizer.idf_))
+print("   -> TF-IDF 완료.")
+
+# Word2Vec 학습 
+print("Word2Vec 학습 중...")
+tokenized_corpus = [word_tokenize(doc.lower()) for doc in all_text]
+w2v_vector_size = 100
+w2v_model = Word2Vec(sentences=tokenized_corpus, vector_size=w2v_vector_size, window=5, min_count=2, workers=4)
+print("   -> Word2Vec 완료.")
+
+# 6. 추천 함수 정의
+
+# 결과 포맷팅 함수 (공통 사용)
+def format_and_save_recommendations(rec_df, user_id, filename_suffix):
+    if rec_df.empty:
+        print(f"오류: 추천 결과가 없습니다 ({filename_suffix}).")
+        return
+
+    output_df = rec_df.rename(columns={
+        'book_title': 'title',
+        'tag_list': 'tags',
+        'similarity_score': 'match_score'
+    })
+    output_df = output_df.reset_index(drop=True)
+    output_df['rank'] = output_df.index + 1
+    output_df = output_df[['rank', 'title', 'tags', 'match_score']]
+
+    output_path = f"{save_base_path}user_{user_id}_top_{TOP_BOOKS_N}_{filename_suffix}.csv"
+    output_df.to_csv(output_path, index=False)
+    print(f"저장 완료: {output_path}")
+    print(output_df.head())
+
+# [Logic 1] TF-IDF 기반 추천 함수
+def get_tfidf_recommendations(liked_titles, top_n=10):
+    liked_movie_indices = movies_df[movies_df['title'].isin(liked_titles)].index
+    if len(liked_movie_indices) == 0: return pd.DataFrame()
+    
+    # 유저 프로파일 벡터 (평균)
+    user_pref_vec = np.mean(movie_tfidf_matrix[liked_movie_indices], axis=0)
+    user_pref_vec = np.asarray(user_pref_vec) 
+
+    # 유사도 계산
+    sim_scores = cosine_similarity(user_pref_vec, book_tfidf_matrix).flatten()
+    top_indices = sim_scores.argsort()[::-1][:top_n]
+    
+    recs = books_df.iloc[top_indices].copy()
+    recs['book_title'] = recs['title']
+    recs['similarity_score'] = sim_scores[top_indices]
+    return recs[['book_title', 'tag_list', 'similarity_score']]
+
+# [Logic 2] Hybrid (W2V + TF-IDF) 기반 추천 함수
+def create_hybrid_vector(text, model, idf_dic, size):
+    vectors, weights = [], []
+    for word in word_tokenize(text.lower()):
+        if word in model.wv and word in idf_dic:
+            vectors.append(model.wv[word])
+            weights.append(idf_dic[word])
+    if not vectors: return np.zeros(size)
+    return np.average(vectors, axis=0, weights=weights)
+
+# Hybrid Matrix 생성 
+print("Hybrid Matrix 생성 중...")
+movie_hybrid_matrix = np.array([create_hybrid_vector(t, w2v_model, idf_dict, w2v_vector_size) for t in movies_df['tag']])
+book_hybrid_matrix = np.array([create_hybrid_vector(t, w2v_model, idf_dict, w2v_vector_size) for t in books_df['tag_list']])
+
+def get_hybrid_recommendations(liked_titles, top_n=10):
+    liked_movie_indices = movies_df[movies_df['title'].isin(liked_titles)].index
+    if len(liked_movie_indices) == 0: return pd.DataFrame()
+
+    user_pref_vec = np.mean(movie_hybrid_matrix[liked_movie_indices], axis=0).reshape(1, -1)
+    
+    sim_scores = cosine_similarity(user_pref_vec, book_hybrid_matrix).flatten()
+    top_indices = sim_scores.argsort()[::-1][:top_n]
+    
+    recs = books_df.iloc[top_indices].copy()
+    recs['book_title'] = recs['title']
+    recs['similarity_score'] = sim_scores[top_indices]
+    return recs[['book_title', 'tag_list', 'similarity_score']]
+
+# 7. 실행 및 결과 저장
+
+if not highly_rated_movie_titles:
+    print("추천을 위한 선호 영화 데이터가 없습니다.")
+else:
+    # TF-IDF 추천 실행
+    print(f"\n--- TF-IDF 기반 도서 추천 ---")
+    recs_tfidf = get_tfidf_recommendations(highly_rated_movie_titles, top_n=TOP_BOOKS_N)
+    format_and_save_recommendations(recs_tfidf, USER_ID_TO_ANALYZE, "book_recs_TFIDF")
+
+    # Hybrid 추천 실행
+    print(f"\n--- Hybrid (Word2Vec) 기반 도서 추천 ---")
+    recs_hybrid = get_hybrid_recommendations(highly_rated_movie_titles, top_n=TOP_BOOKS_N)
+    format_and_save_recommendations(recs_hybrid, USER_ID_TO_ANALYZE, "book_recs_Hybrid")
+
+print("\n--- 모든 리포트 생성 작업 완료 ---")
