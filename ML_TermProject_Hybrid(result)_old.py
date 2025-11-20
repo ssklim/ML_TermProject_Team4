@@ -14,6 +14,7 @@ svd_model_path = path_prefix + "svd_model.dump"
 translator_model_path = path_prefix + "VectorTranslator_model.joblib"
 book_vectors_path = path_prefix + "book_vectors.npz"
 book_ids_path = path_prefix + "book_id_mapping.csv"
+movie_ratings_path = path_prefix + "ratings_for_cf.csv"
 book_meta_path = path_prefix + "books_for_content.csv"
 
 try:
@@ -28,6 +29,7 @@ try:
     
     # 4. ID 매핑 및 기타 데이터
     df_book_ids = pd.read_csv(book_ids_path)
+    df_movie_ratings = pd.read_csv(movie_ratings_path)
     df_book_meta = pd.read_csv(book_meta_path).set_index('book_id')
 
 except FileNotFoundError as e:
@@ -36,8 +38,10 @@ except FileNotFoundError as e:
 
 # 빠른 조회를 위한 "매핑" 생성
 print("--- [ 2/5 ] SVD 사용자 매핑(Dictionary) 생성 중... ---")
-# SVD 모델 파일에 저장된 trainset을 직접 로드하여 메모리 사용량 최적화
-trainset = svd_model.trainset
+# SVD 모델의 내부 ID(inner_id)와 실제 ID(raw_id) 매핑
+reader = Reader(rating_scale=(0.5, 5.0))
+data = Dataset.load_from_df(df_movie_ratings, reader)
+trainset = data.build_full_trainset()
 user_raw_to_inner = {trainset.to_raw_uid(inner_id): inner_id for inner_id in trainset.all_users()}
 book_index_to_id = {index: book_id for index, book_id in enumerate(df_book_ids['book_id'])}
 
@@ -103,4 +107,4 @@ def get_hybrid_recommendations(user_id, top_n=10):
     return
 
 # 추천 시스템 실행
-get_hybrid_recommendations(user_id=7, top_n=10)
+get_hybrid_recommendations(user_id=1, top_n=10)
